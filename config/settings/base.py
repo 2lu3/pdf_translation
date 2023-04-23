@@ -34,6 +34,7 @@ SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 INSTALLED_APPS = [
     "apps.user.apps.UserConfig",
     "apps.translator.apps.TranslatorConfig",
+    "apps.upload.apps.UploadConfig",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",

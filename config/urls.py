@@ -21,7 +21,8 @@ from django.conf import settings
 
 urlpatterns = [
     path("admin/", admin.site.urls),
-    path("translator/", include("translator.urls")),
+    path("translator/", include("translator.urls"), name="translator"),
+    path("upload/", include("upload.urls"), name="upload"),
 ]
 
 if settings.DEBUG:
