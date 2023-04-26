@@ -1,121 +1,152 @@
-from pdfminer.high_level import extract_pages
-from pdfminer.layout import LTPage, LTTextBox, LTTextContainer, LTChar, LTTextLine
+from argparse import ArgumentParser
 from dataclasses import dataclass
-from scipy.cluster.hierarchy import linkage, fcluster
-import requests
-import os
-from time import sleep
+from itertools import zip_longest
+import json
+import fitz
+
+# page.add_redact_annot(
+#            block[:4],
+#            text="hello world.helo world.helo world.helo world.helo world.helo world.....",
+#        )
+#
+# page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+#
+# doc.save("output.pdf")
+
+
+@dataclass
+class Line:
+    text: str
+    font_size: float
 
 
 @dataclass
 class Group:
-    """画面上でまとまっている文字列"""
+    """画面上と文字サイズで分割された文字列"""
 
-    page: int
-    bbox: tuple
-    text: str
-    """bboxの中で最も多い文字の大きさ"""
-    char_size: float
+    page_number: int
+    bbox: tuple[float, float, float, float]
+    lines: list[Line]
 
+    @property
+    def text(self):
+        return "".join([line.text for line in self.lines])
 
-@dataclass
-class Paragraph:
-    """段落を構成するグループの集合"""
+def extract_blocks(path) -> list[Group]:
+    def font_size(line):
+        """lineの中で最も頻度の高いフォントサイズを返す"""
+        font_sizes: list[float] = []
+        for span in line["spans"]:
+            font_sizes.extend([span["size"]] * len(span["text"]))
 
-    groups: list[Group]
-
-
-def extract_groups(page: LTPage) -> list[Group]:
-    """pageオブジェクトからからGroupを抽出する"""
-
-    def main_char_size(textbox: LTTextBox) -> float:
-        """textbox内の文字の大きさの最頻値を取得する"""
-
-        char_sizes: list[float] = []
-        for line in textbox:
-            if not isinstance(line, LTTextLine):
+        # ちょっとだけ大きさが違うフォントサイズは同じフォントサイズとみなす
+        sorted_font_sizzes = sorted(font_sizes)
+        for font_size1, font_size2 in zip(sorted_font_sizzes, sorted_font_sizzes[1:]):
+            if font_size1 == font_size2:
                 continue
-            for char in line:
-                if not isinstance(char, LTChar):
-                    continue
-                char_sizes.append(char.size)
 
-        return max(set(char_sizes), key=char_sizes.count)
+            if font_size2 - font_size1 < 0.5:
+                font_size1_num = font_sizes.count(font_size1)
+                font_sizes = [
+                    font_size for font_size in font_sizes if font_size != font_size1
+                ] + [font_size2] * font_size1_num
+
+        return max(set(font_sizes), key=font_sizes.count)
+
+    def text(line):
+        """lineの中のtextを返す"""
+        raw_text = "".join([span["text"] for span in line["spans"]])
+        return "".join(raw_text.replace("\n", ""))
 
     result: list[Group] = []
-    for textbox in page:
-        # TextBoxのみ抽出
-        if not isinstance(textbox, LTTextBox):
-            continue
+    doc = fitz.open(path)
 
-        print(textbox.get_text(), end="\n\n\n")
+    for page in doc:
+        textpage = page.get_textpage()
 
-        result.append(
-            Group(
-                page=page.pageid,
-                bbox=textbox.bbox,
-                text=textbox.get_text().replace("\n", ""),
-                char_size=main_char_size(textbox),
-            )
-        )
-    return result
+        json_dict = json.loads(textpage.extractJSON())
 
+        for block in json_dict["blocks"]:
+            lines: list[Line] = []
+            for line in block["lines"]:
+                lines.append(
+                    Line(
+                        text=text(line),
+                        font_size=font_size(line),
+                    )
+                )
 
-def groups2paragraphs(groups: list[Group]) -> list[Paragraph]:
-    result: list[Paragraph] = [Paragraph([])]
-
-    # ピリオドで終わると新しく段落を作る
-    for group in groups:
-        result[-1].groups.append(group)
-        if group.text.endswith("."):
-            result.append(Paragraph([]))
-
-    return result
-
-
-def translate_paragraphs(paragraphs: list[Paragraph]) -> list[Paragraph]:
-    def translate_paragraph(
-        paragraph: Paragraph, API_KEY=os.environ.get("DEEPL_API_KEY")
-    ) -> Paragraph:
-        result = Paragraph([])
-        
-        for group in paragraph.groups:
-            params = {
-                "auth_key": API_KEY,
-                "text": group.text,
-                "source_lang": "EN",
-                "target_lang": "JA",
-            }
-    
-            request = requests.post(
-                "https://api-free.deepl.com/v2/translate", params=params
-            )
-            result.groups.append(
+            result.append(
                 Group(
-                    page=group.page,
-                    bbox=group.bbox,
-                    text=request.json()["translations"][0]["text"],
-                    char_size=group.char_size,
+                    page_number=page.number,
+                    bbox=block["bbox"],
+                    lines=lines,
                 )
             )
-            sleep(1)
 
-        return result
-
-    return [translate_paragraph(paragraph) for paragraph in paragraphs]
+    return result
 
 
+def resplit_block_by_period(groups: list[Group]) -> list[Group]:
+    """ピリオドで終わっていない文章を次の文章のピリオドまで結合する"""
 
-def main(path):
-    groups: list[Group] = []
-    for page_layout in extract_pages(path):
-        groups.extend(extract_groups(page_layout))
+    def remove_text_until_period(group: Group) -> tuple[str, Group]:
+        result: str = ""
+        for line in group.lines:
+            if "." in line.text:
+                result += line.text.split(".")[0] + "."
+                line.text = line.text[len(line.text.split(".")[0] + "."):]
+                return result, group
+            else:
+                result += line.text
+                del line
 
-    paragraphs = groups2paragraphs(groups)
-    translated_paragraphs = translate_paragraphs(paragraphs)
+        raise ValueError("ピリオドが見つかりませんでした")
 
-    for paragraph in translated_paragraphs:
-        for group in paragraph.groups:
-            print(group.text, end="\n\n\n")
+    result: list[Group] = groups
 
-main("example.pdf")
+    # TODO: group2が反映されない
+    for group1, group2 in zip(result, result[1:]):
+
+        if group1.text.endswith("."):
+            continue
+
+        if abs(group1.lines[-1].font_size - group2.lines[0].font_size) > 0.5:
+            continue
+
+        # group1がピリオドで終わっていない場合
+        # 次のgroupのピリオドまでを結合することで意味が通る文章の分け方になる
+        text, group2 = remove_text_until_period(group2)
+        group1.lines[-1].text += text
+
+    return result
+
+
+def redact_blocks(path, blocks):
+    pass
+
+
+def main():
+    parser = ArgumentParser()
+    parser.add_argument(
+        "input_pdf", type=str, default="example.pdf", help="input pdf file"
+    )
+    parser.add_argument(
+        "output_pdf", type=str, default="output.pdf", help="output pdf file"
+    )
+
+    args = parser.parse_args()
+
+    groups = extract_blocks(args.input_pdf)
+    for group in groups:
+        for line in group.lines:
+            print(line.font_size, line.text)
+        print('--------------------------')
+
+    groups = resplit_block_by_period(groups)
+    for group in groups:
+        print(group.text, end="\n\n\n")
+
+
+if __name__ == "__main__":
+    main()
