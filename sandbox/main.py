@@ -147,9 +147,18 @@ def translate(groups: list[Group]) -> list[Group]:
 
 
 def output_pdf(input_path: str, output_path: str, groups: list[Group]):
+    font = fitz.Font("cjk")
+    print(font.name)
     doc = fitz.open(input_path)
 
     for page in doc:
+        print(page.mediabox)
+        page.insert_font(fontname="F0", fontbuffer=font.buffer)
+
+        x_center = (page.mediabox[0] + page.mediabox[2]) / 2
+        y_bottom = page.mediabox[1]
+        page.insert_text([x_center - 50,y_bottom + 50, x_center+10, y_bottom+20], "a", fontname="F0", render_mode=3)
+        print(page.get_fonts())
         for group in groups:
             if group.page_number != page.number:
                 continue
@@ -157,6 +166,7 @@ def output_pdf(input_path: str, output_path: str, groups: list[Group]):
             page.add_redact_annot(
                 group.bbox,
                 text=group.text,
+                #fontname="F0",
             )
 
         page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
