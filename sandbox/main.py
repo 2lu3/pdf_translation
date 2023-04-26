@@ -2,7 +2,10 @@ from argparse import ArgumentParser
 from dataclasses import dataclass
 from itertools import zip_longest
 import json
+from typing import Optional
 import fitz
+import os
+import requests
 
 # page.add_redact_annot(
 #            block[:4],
@@ -27,12 +30,22 @@ class Group:
     page_number: int
     bbox: tuple[float, float, float, float]
     lines: list[Line]
+    # _text default is None
+    _text: Optional[str] = None
 
     @property
     def text(self):
-        return "".join([line.text for line in self.lines])
+        if self._text is None:
+            return "".join([line.text for line in self.lines])
+        else:
+            return self._text
 
-def extract_blocks(path) -> list[Group]:
+    @text.setter
+    def text(self, value):
+        self._text = value
+
+
+def extract_groups(path) -> list[Group]:
     def font_size(line):
         """lineの中で最も頻度の高いフォントサイズを返す"""
         font_sizes: list[float] = []
@@ -90,24 +103,10 @@ def extract_blocks(path) -> list[Group]:
 def resplit_block_by_period(groups: list[Group]) -> list[Group]:
     """ピリオドで終わっていない文章を次の文章のピリオドまで結合する"""
 
-    def remove_text_until_period(group: Group) -> tuple[str, Group]:
-        result: str = ""
-        for line in group.lines:
-            if "." in line.text:
-                result += line.text.split(".")[0] + "."
-                line.text = line.text[len(line.text.split(".")[0] + "."):]
-                return result, group
-            else:
-                result += line.text
-                del line
-
-        raise ValueError("ピリオドが見つかりませんでした")
-
     result: list[Group] = groups
 
     # TODO: group2が反映されない
     for group1, group2 in zip(result, result[1:]):
-
         if group1.text.endswith("."):
             continue
 
@@ -116,14 +115,52 @@ def resplit_block_by_period(groups: list[Group]) -> list[Group]:
 
         # group1がピリオドで終わっていない場合
         # 次のgroupのピリオドまでを結合することで意味が通る文章の分け方になる
-        text, group2 = remove_text_until_period(group2)
-        group1.lines[-1].text += text
+        for line in group2.lines:
+            if "." in line.text:
+                new_text = line.text.split(".")[0] + "."
+                group1.lines[-1].text += new_text
+                line.text = line.text[len(new_text) :]
+                break
+            else:
+                group1.lines[-1].text += line.text
+                group2.lines.remove(line)
 
     return result
 
 
-def redact_blocks(path, blocks):
-    pass
+def translate(groups: list[Group]) -> list[Group]:
+    for group in groups:
+        params = {
+            "auth_key": os.environ.get("DEEPL_API_KEY"),
+            "text": group.text,
+            "source_lang": "EN",
+            "target_lang": "JA",
+        }
+
+        request = requests.post(
+            "https://api-free.deepl.com/v2/translate", params=params
+        )
+
+        group.text = request.json()["translations"][0]["text"]
+
+    return groups
+
+
+def output_pdf(input_path: str, output_path: str, groups: list[Group]):
+    doc = fitz.open(input_path)
+
+    for page in doc:
+        for group in groups:
+            if group.page_number != page.number:
+                continue
+
+            page.add_redact_annot(
+                group.bbox,
+                text=group.text,
+            )
+
+        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+    doc.save(output_path)
 
 
 def main():
@@ -137,15 +174,12 @@ def main():
 
     args = parser.parse_args()
 
-    groups = extract_blocks(args.input_pdf)
-    for group in groups:
-        for line in group.lines:
-            print(line.font_size, line.text)
-        print('--------------------------')
-
+    groups = extract_groups(args.input_pdf)
     groups = resplit_block_by_period(groups)
-    for group in groups:
-        print(group.text, end="\n\n\n")
+
+    groups = translate(groups)
+
+    output_pdf(args.input_pdf, args.output_pdf, groups)
 
 
 if __name__ == "__main__":
