@@ -118,4 +118,4 @@ def main(path):
         for group in paragraph.groups:
             print(group.text, end="\n\n\n")
 
-main("example.pdf")
+main("output.pdf")

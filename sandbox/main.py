@@ -103,10 +103,13 @@ def extract_groups(path) -> list[Group]:
 def resplit_block_by_period(groups: list[Group]) -> list[Group]:
     """ピリオドで終わっていない文章を次の文章のピリオドまで結合する"""
 
-    result: list[Group] = groups
 
     # TODO: group2が反映されない
-    for group1, group2 in zip(result, result[1:]):
+    for group1, group2 in zip(groups, groups[1:]):
+        if len(group1.lines) == 0:
+            groups.remove(group1)
+            continue
+
         if group1.text.endswith("."):
             continue
 
@@ -125,11 +128,12 @@ def resplit_block_by_period(groups: list[Group]) -> list[Group]:
                 group1.lines[-1].text += line.text
                 group2.lines.remove(line)
 
-    return result
+    return groups
 
 
 def translate(groups: list[Group]) -> list[Group]:
     for group in groups:
+        print('EN:', group.text)
         params = {
             "auth_key": os.environ.get("DEEPL_API_KEY"),
             "text": group.text,
@@ -142,6 +146,7 @@ def translate(groups: list[Group]) -> list[Group]:
         )
 
         group.text = request.json()["translations"][0]["text"]
+        print("JA:", group.text)
 
     return groups
 
@@ -157,7 +162,7 @@ def output_pdf(input_path: str, output_path: str, groups: list[Group]):
 
         x_center = (page.mediabox[0] + page.mediabox[2]) / 2
         y_bottom = page.mediabox[1]
-        page.insert_text([x_center - 50,y_bottom + 50, x_center+10, y_bottom+20], "a", fontname="F0", render_mode=3)
+        page.insert_text([x_center,y_bottom + 50], "a", fontname="F0", render_mode=3)
         print(page.get_fonts())
         for group in groups:
             if group.page_number != page.number:
@@ -166,7 +171,7 @@ def output_pdf(input_path: str, output_path: str, groups: list[Group]):
             page.add_redact_annot(
                 group.bbox,
                 text=group.text,
-                #fontname="F0",
+                fontname="F0",
             )
 
         page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
@@ -186,6 +191,8 @@ def main():
 
     groups = extract_groups(args.input_pdf)
     groups = resplit_block_by_period(groups)
+    for group in groups:
+        print(group.text, end="\n\n\n")
 
     groups = translate(groups)
 
